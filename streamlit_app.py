@@ -4,203 +4,211 @@ from docx import Document
 import PyPDF2
 import json
 import io
+import re
 
-# 1. Setup Page Configuration
+# 1. Page Configuration
 st.set_page_config(
-    page_title="StudyStream Generator", 
-    page_icon="📚", 
+    page_title="StudyStream | Powered by Gemini",
+    page_icon="📚",
     layout="wide",
-    initial_sidebar_state="expanded"
 )
 
-# 2. Custom CSS for StudyStream Branding
+# 2. Modern Academic Styling
 st.markdown("""
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&family=Playfair+Display:wght@700&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+    
+    html, body, [class*="css"] {
+        font-family: 'Inter', sans-serif;
+    }
     
     .stApp {
-        background-color: #f8fafc;
+        background-color: #fcfcfc;
     }
-    .main-title {
-        font-family: 'Playfair Display', serif;
-        color: #0f172a;
+
+    .header-style {
         font-size: 3rem;
-        margin-bottom: 0.5rem;
+        font-weight: 700;
+        color: #1e293b;
+        letter-spacing: -0.05em;
+        margin-bottom: 0px;
     }
-    .subtitle {
-        color: #64748b;
-        margin-bottom: 2rem;
-    }
-    div.stButton > button:first-child {
-        background-color: #0284c7;
-        color: white;
-        border-radius: 8px;
-        border: none;
-        padding: 0.6rem 1rem;
+    
+    .status-badge {
+        padding: 4px 12px;
+        border-radius: 20px;
+        font-size: 0.8rem;
         font-weight: 600;
-        width: 100%;
-        transition: all 0.2s;
+        background-color: #e0f2fe;
+        color: #0369a1;
     }
-    div.stButton > button:first-child:hover {
-        background-color: #0369a1;
-        border: none;
-        color: white;
-        transform: translateY(-1px);
-    }
-    .guide-card {
-        background-color: white;
-        padding: 2rem;
-        border-radius: 12px;
+
+    /* Term Card */
+    .term-card {
+        background: white;
+        padding: 1.2rem;
+        border-radius: 10px;
         border: 1px solid #e2e8f0;
-        box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1);
-    }
-    .term-badge {
-        background-color: #f1f5f9;
-        padding: 1rem;
-        border-radius: 8px;
-        border-left: 4px solid #0284c7;
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
         margin-bottom: 1rem;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# 3. Helper Functions for File Parsing
-def parse_pdf(file):
-    try:
-        pdf_reader = PyPDF2.PdfReader(file)
-        return "\n".join([page.extract_text() or "" for page in pdf_reader.pages])
-    except Exception as e:
-        return f"Error reading PDF: {e}"
+# 3. Helpers
+def parse_files(uploaded_files):
+    text = ""
+    for f in uploaded_files:
+        try:
+            if f.name.endswith('.pdf'):
+                pdf = PyPDF2.PdfReader(f)
+                text += f"\n\n--- {f.name} ---\n" + "\n".join([p.extract_text() or "" for p in pdf.pages])
+            elif f.name.endswith('.docx'):
+                doc = Document(f)
+                text += f"\n\n--- {f.name} ---\n" + "\n".join([p.text for p in doc.paragraphs])
+            else:
+                text += f"\n\n--- {f.name} ---\n" + f.read().decode("utf-8")
+        except Exception as e:
+            st.error(f"Error parsing {f.name}: {e}")
+    return text
 
-def parse_docx(file):
+def extract_json(text):
     try:
-        doc = Document(file)
-        return "\n".join([para.text for para in doc.paragraphs])
-    except Exception as e:
-        return f"Error reading DOCX: {e}"
+        # Clean up Markdown formatting if Gemini wraps it in ```json
+        match = re.search(r'\{.*\}', text, re.DOTALL)
+        if match:
+            return json.loads(match.group())
+        return json.loads(text)
+    except:
+        return None
 
-# 4. App Sidebar for Configuration
+# 4. Sidebar Workspace
 with st.sidebar:
-    st.image("https://cdn-icons-png.flaticon.com/512/3429/3429153.png", width=80)
-    st.title("StudyStream Config")
+    st.title("📚 StudyStream Pro")
+    st.markdown("<span class='status-badge'>Powered by Streamlit</span>", unsafe_allow_html=True)
+    st.divider()
     
-    api_key = st.text_input("Gemini API Key", type="password", help="Get your key at aistudio.google.com")
+    api_key_input = st.text_input("Gemini API Key", type="password", help="Get one at aistudio.google.com")
     
-    model_choice = st.selectbox("Intelligence Model", 
-        ["gemini-1.5-flash", "gemini-1.5-flash-latest", "gemini-1.5-pro", "gemini-pro"],
-        help="If one fails with 404, try the -latest version."
+    # Using 'latest' is usually safest for 404 errors
+    model_id = st.selectbox(
+        "Model Version",
+        ["gemini-1.5-flash-latest", "gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash-exp"],
+        help="If you get 404, stick to 'gemini-1.5-flash-latest'."
     )
     
-    topic = st.text_input("Subject Topic", value="Chemistry: Wave Properties")
-    difficulty = st.selectbox("Target Level", ["Introductory", "Intermediate (MYP Grade 10)", "Advanced (IB DP)"])
+    topic = st.text_input("Topic Name", "Molecular Chemistry")
+    level = st.select_slider("Level", ["Intro", "Mid", "Pro"], value="Mid")
     
     st.divider()
-    st.subheader("Upload Material")
-    uploaded_files = st.file_uploader("Drop notes or PDFs here", type=['txt', 'pdf', 'docx'], accept_multiple_files=True)
-
-# 5. Main UI Layout
-st.markdown("<h1 class='main-title'>StudyStream <span style='color: #0284c7;'>v2</span></h1>", unsafe_allow_html=True)
-st.markdown("<p class='subtitle'>The Development of a Driven Study Guide Generator • 2026 Academic Supporter</p>", unsafe_allow_html=True)
-
-col_input, col_output = st.columns([1, 1.5], gap="large")
-
-with col_input:
-    st.subheader("Source Material")
+    uploaded_docs = st.file_uploader("Upload Source Documents", type=["pdf", "docx", "txt"], accept_multiple_files=True)
     
-    # Auto-read uploaded files into the text area
-    file_content = ""
-    if uploaded_files:
-        for f in uploaded_files:
-            if f.name.endswith('.pdf'): file_content += parse_pdf(f)
-            elif f.name.endswith('.docx'): file_content += parse_docx(f)
-            else: file_content += f.read().decode("utf-8")
-            file_content += "\n\n"
+    if st.button("Reset Session"):
+        st.session_state.clear()
+        st.rerun()
 
-    notes = st.text_area("Paste your notes below:", value=file_content, height=450, placeholder="Paste your raw textbook notes or classroom scribbles here...")
+# 5. Application UI
+st.markdown("<h1 class='header-style'>StudyStream Generator</h1>", unsafe_allow_html=True)
+st.write("Generate professional-grade study materials from your notes.")
+
+left, right = st.columns([1, 1.2], gap="large")
+
+with left:
+    st.markdown("### 📥 Source Notes")
+    source_content = st.text_area(
+        "Paste or Preview Content",
+        value=parse_files(uploaded_docs),
+        height=400,
+        placeholder="Upload files in sidebar or paste text here..."
+    )
     
-    if st.button("✨ Generate Study Guide"):
-        if not api_key:
-            st.warning("Please enter your API Key in the sidebar first!")
-        elif not notes.strip():
-            st.error("I need some notes to work with!")
+    if st.button("Generate Study Guide", use_container_width=True):
+        if not api_key_input:
+            st.error("Missing API Key.")
+        elif not source_content.strip():
+            st.warning("Please provide notes.")
         else:
-            with st.spinner("Analyzing text and structuring your guide..."):
+            with st.spinner(f"Gemini {model_id} is analyzing..."):
                 try:
-                    genai.configure(api_key=api_key)
-                    model = genai.GenerativeModel(model_choice)
+                    genai.configure(api_key=api_key_input)
+                    model = genai.GenerativeModel(model_id)
                     
                     prompt = f"""
-                    Role: Academic Supporter
-                    Task: Transform notes into a high-quality study guide.
+                    Role: Expert Academic Tutor.
                     Topic: {topic}
-                    Level: {difficulty}
-                    Notes: {notes}
+                    Level: {level}
+                    Context: {source_content}
 
-                    Instructions:
-                    1. Provide a 3-sentence executive summary.
-                    2. Clean at least 5 key terms with clear definitions.
-                    3. Write 3 practice questions with tips/hints.
-                    4. Response format: STRICT JSON.
-                    JSON Keys: 'summary' (str), 'keyTerms' (list of {{term, definition}}), 'practiceQuestions' (list of {{question, hint}})
+                    Task: Create a precise study guide. 
+                    Format: Result MUST be ONLY a JSON object.
+                    Structure:
+                    {{ 
+                      "summary": "3-5 high-level sentences",
+                      "keyTerms": [{"term": "term", "definition": "clear definition"}],
+                      "practiceQuestions": [{"question": "...", "hint": "..."}] 
+                    }}
                     """
                     
                     response = model.generate_content(prompt)
-                    # Cleaning response in case of markdown blocks
-                    raw_json = response.text.replace('```json', '').replace('```', '').strip()
-                    st.session_state.guide_data = json.loads(raw_json)
-                    st.balloons()
+                    data = extract_json(response.text)
+                    
+                    if data:
+                        st.session_state.study_data = data
+                        st.session_state.study_topic = topic
+                        st.success("Analysis Complete!")
+                    else:
+                        st.error("Gemini didn't return a valid format. Try again.")
+                        st.code(response.text)
+                        
                 except Exception as e:
-                    st.error(f"Generation failed: {e}")
-                    if "404" in str(e):
-                        st.info("💡 Try changing the model in the sidebar to 'gemini-1.5-flash-latest'.")
+                    err = str(e)
+                    if "429" in err:
+                        st.error("Quota Exceeded (429). The Free Tier has limits. Wait 60 seconds and try again, or use a smaller amount of text.")
+                    elif "404" in err:
+                        st.error(f"Model {model_id} not found (404). Try 'gemini-1.5-flash-latest'.")
+                    else:
+                        st.error(f"Error: {e}")
 
-with col_output:
-    st.subheader("Interactive Preview")
-    
-    if "guide_data" in st.session_state:
-        data = st.session_state.guide_data
+with right:
+    st.markdown("### 🚀 Generated Result")
+    if "study_data" in st.session_state:
+        res = st.session_state.study_data
         
-        # Guide Header
-        st.markdown(f"""
-        <div class='guide-card'>
-            <h2 style='margin-top:0;'>{topic}</h2>
-            <p style='color:#0284c7; font-weight:bold; font-size:0.8rem;'>LEVEL: {difficulty.upper()}</p>
-            <hr>
-            <h4>01 / Summary</h4>
-            <p style='color:#475569; line-height:1.6;'>{data.get('summary')}</p>
-        </div>
-        """, unsafe_allow_html=True)
+        st.markdown(f"#### {st.session_state.study_topic}")
+        st.write("---")
         
-        st.write("")
+        st.markdown("##### 📖 Summary")
+        st.write(res.get('summary', 'No summary generated.'))
         
-        # Terms
-        st.markdown("#### 02 / Key Terminology")
-        cols = st.columns(2)
-        for i, term in enumerate(data.get('keyTerms', [])):
-            with cols[i % 2]:
-                st.markdown(f"""
-                <div class='term-badge'>
-                    <strong style='color:#0f172a;'>{term.get('term')}</strong><br>
-                    <span style='font-size:0.85rem; color:#64748b;'>{term.get('definition')}</span>
-                </div>
-                """, unsafe_allow_html=True)
-        
-        # Assessment
-        st.markdown("#### 03 / Practice Assessment")
-        for i, q in enumerate(data.get('practiceQuestions', [])):
-            with st.expander(f"Question {i+1}: {q.get('question')[:50]}..."):
+        st.markdown("##### 🏷️ Key Terms")
+        t_col1, t_col2 = st.columns(2)
+        for i, item in enumerate(res.get('keyTerms', [])):
+            col = t_col1 if i % 2 == 0 else t_col2
+            col.markdown(f"""
+            <div class='term-card'>
+                <strong style='color: #0369a1;'>{item.get('term')}</strong><br/>
+                <small>{item.get('definition')}</small>
+            </div>
+            """, unsafe_allow_html=True)
+            
+        st.markdown("##### 📝 Practice")
+        for i, q in enumerate(res.get('practiceQuestions', [])):
+            with st.expander(f"Question {i+1}"):
                 st.write(q.get('question'))
-                st.info(f"**Hint:** {q.get('hint')}")
+                st.caption(f"Hint: {q.get('hint')}")
+                
+        # Export
+        export_txt = f"TOPIC: {st.session_state.study_topic}\n\nSUMMARY\n{res.get('summary')}\n\nKEY TERMS\n"
+        for t in res.get('keyTerms', []): export_txt += f"- {t.get('term')}: {t.get('definition')}\n"
         
-        # Download Action
-        st.divider()
-        dl_text = f"STUDY GUIDE: {topic}\n\nSUMMARY\n{data.get('summary')}\n\nKEY TERMS\n"
-        for t in data.get('keyTerms', []): dl_text += f"- {t.get('term')}: {t.get('definition')}\n"
-        
-        st.download_button("📥 Download Guide as Text", data=dl_text, file_name="studystream_guide.txt")
-        
+        st.download_button("📥 Download txt", data=export_txt, file_name="studyguide.txt")
     else:
-        st.info("Waiting for input... Upload your notes and click generate to build your guide!")
+        st.info("Your study guide will appear here after generation.")
 
 # Footer
-st.markdown("<br><hr><p style='text-align: center; color: #94a3b8; font-size: 0.7rem;'>© 2026 Scientific Innovation Project • Created by Ameen Fotovat</p>", unsafe_allow_html=True)
+st.divider()
+st.markdown("""
+<div style='text-align: center; color: #94a3b8; font-size: 0.8rem;'>
+    Made with StudyStream • Built with <b>Streamlit</b> & <b>Google Gemini</b> 
+</div>
+""", unsafe_allow_html=True)
