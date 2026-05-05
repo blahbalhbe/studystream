@@ -115,16 +115,22 @@ left, right = st.columns([1, 1.2], gap="large")
 
 with left:
     st.markdown("### 📥 Source Notes")
-    if len(source_content) > 15000:
-        st.warning("⚠️ High character count. If you encounter a '429 Quota' error, try selecting a smaller portion of text.")
-        
+    
+    # 1. Get the text from uploaded files first
+    parsed_text = parse_files(uploaded_docs)
+    
+    # 2. Create the text area and assign its output to source_content
     source_content = st.text_area(
         "Paste or Preview Content",
-        value=source_content,
+        value=parsed_text,
         height=400,
         placeholder="Upload files in sidebar or paste text here..."
     )
     
+    # 3. NOW check the length, since source_content exists!
+    if len(source_content) > 15000:
+        st.warning("⚠️ High character count. If you encounter a '429 Quota' error, try selecting a smaller portion of text.")
+        
     if st.button("Generate Study Guide", use_container_width=True):
         if not api_key_input:
             st.error("Missing API Key.")
@@ -135,6 +141,7 @@ with left:
                 try:
                     genai.configure(api_key=api_key_input)
                     model = genai.GenerativeModel(model_id)
+# ... (The rest of your prompt and try/except block remains exactly the same below this)
                     
                     prompt = f"""
                     Role: Expert Academic Tutor.
