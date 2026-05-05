@@ -115,9 +115,12 @@ left, right = st.columns([1, 1.2], gap="large")
 
 with left:
     st.markdown("### 📥 Source Notes")
+    if len(source_content) > 15000:
+        st.warning("⚠️ High character count. If you encounter a '429 Quota' error, try selecting a smaller portion of text.")
+        
     source_content = st.text_area(
         "Paste or Preview Content",
-        value=parse_files(uploaded_docs),
+        value=source_content,
         height=400,
         placeholder="Upload files in sidebar or paste text here..."
     )
@@ -140,12 +143,12 @@ with left:
                     Context: {source_content}
 
                     Task: Create a precise study guide. 
-                    Format: Result MUST be ONLY a JSON object.
+                    Format: Result MUST be ONLY a JSON object. No conversational filler or markdown code blocks.
                     Structure:
                     {{ 
                       "summary": "3-5 high-level sentences",
-                      "keyTerms": [{"term": "term", "definition": "clear definition"}],
-                      "practiceQuestions": [{"question": "...", "hint": "..."}] 
+                      "keyTerms": [{{ "term": "term name", "definition": "clear academic definition" }}],
+                      "practiceQuestions": [{{ "question": "the question", "hint": "a helpful clue" }}] 
                     }}
                     """
                     
