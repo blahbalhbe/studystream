@@ -161,7 +161,7 @@ def extract_json(text: str) -> Optional[Dict]:
         return None
 
 
-def validate_input(api_key: str, content: str) -> tuple[bool, str]:
+def validate_input(api_key: str, content: str) -> tuple:
     """
     Validate API key and content before generation.
     
@@ -184,7 +184,7 @@ def validate_input(api_key: str, content: str) -> tuple[bool, str]:
     return True, ""
 
 
-def get_char_count_status(char_count: int) -> tuple[str, str]:
+def get_char_count_status(char_count: int) -> tuple:
     """
     Get character count status indicator.
     
@@ -212,7 +212,7 @@ def call_gemini_with_retry(model, prompt: str, max_retries: int = CONFIG["MAX_RE
         max_retries: Maximum number of retry attempts
         
     Returns:
-        Response object from API, or None on failure
+        Response object from API
         
     Raises:
         Exception: If all retries fail
@@ -256,7 +256,7 @@ with st.sidebar:
     # Model selection
     model_id = st.selectbox(
         "Model Version",
-        ["gemini-1.5-flash-latest", "gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash-exp"],
+        ["gemini-1.5-flash-latest", "gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"],
         help="Use 'gemini-1.5-flash-latest' if you encounter 404 errors."
     )
     
