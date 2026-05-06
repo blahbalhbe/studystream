@@ -3,17 +3,41 @@ import google.generativeai as genai
 from docx import Document
 import PyPDF2
 import json
-import io
+import os
 import re
+import time
+from typing import Optional, Dict, List
+from dotenv import load_dotenv
 
-# 1. Page Configuration
+# Load environment variables
+load_dotenv()
+
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
+CONFIG = {
+    "MAX_CHARS": 15000,
+    "WARN_CHARS": 12000,
+    "MAX_RETRIES": 3,
+    "RETRY_DELAY": 2,  # seconds
+    "TEXTAREA_HEIGHT": 400,
+    "ICON_SIZE": 80,
+    "MIN_TERMS": 5,
+    "NUM_QUESTIONS": 3,
+}
+
+# ============================================================================
+# 1. PAGE CONFIGURATION
+# ============================================================================
 st.set_page_config(
     page_title="StudyStream | Powered by Gemini",
     page_icon="📚",
     layout="wide",
 )
 
-# 2. Modern Academic Styling
+# ============================================================================
+# 2. CUSTOM STYLING
+# ============================================================================
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
@@ -43,7 +67,6 @@ st.markdown("""
         color: #0369a1;
     }
 
-    /* Term Card */
     .term-card {
         background: white;
         padding: 1.2rem;
@@ -51,174 +74,421 @@ st.markdown("""
         border: 1px solid #e2e8f0;
         box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
         margin-bottom: 1rem;
+        transition: all 0.2s ease;
+    }
+    
+    .term-card:hover {
+        box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+        transform: translateY(-2px);
+    }
+    
+    .char-count-good {
+        color: #16a34a;
+    }
+    
+    .char-count-warn {
+        color: #f97316;
+    }
+    
+    .char-count-bad {
+        color: #dc2626;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# 3. Helpers
-def parse_files(uploaded_files):
+# ============================================================================
+# 3. HELPER FUNCTIONS
+# ============================================================================
+
+def parse_files(uploaded_files: List) -> str:
+    """
+    Parse uploaded files (PDF, DOCX, TXT) and return combined text.
+    
+    Args:
+        uploaded_files: List of uploaded file objects from Streamlit
+        
+    Returns:
+        str: Combined text from all files, with file names as headers
+    """
     text = ""
+    if not uploaded_files:
+        return text
+        
     for f in uploaded_files:
         try:
             if f.name.endswith('.pdf'):
                 pdf = PyPDF2.PdfReader(f)
-                text += f"\n\n--- {f.name} ---\n" + "\n".join([p.extract_text() or "" for p in pdf.pages])
+                pages_text = "\n".join([p.extract_text() or "" for p in pdf.pages])
+                text += f"\n\n--- {f.name} ---\n{pages_text}"
             elif f.name.endswith('.docx'):
                 doc = Document(f)
-                text += f"\n\n--- {f.name} ---\n" + "\n".join([p.text for p in doc.paragraphs])
-            else:
-                text += f"\n\n--- {f.name} ---\n" + f.read().decode("utf-8")
+                para_text = "\n".join([p.text for p in doc.paragraphs])
+                text += f"\n\n--- {f.name} ---\n{para_text}"
+            else:  # .txt or other text files
+                try:
+                    content = f.read().decode("utf-8")
+                except UnicodeDecodeError:
+                    # Fallback to latin-1 encoding
+                    f.seek(0)
+                    content = f.read().decode("latin-1")
+                text += f"\n\n--- {f.name} ---\n{content}"
         except Exception as e:
-            st.error(f"Error parsing {f.name}: {e}")
+            st.error(f"❌ Error parsing {f.name}: {str(e)}")
+    
     return text
 
-def extract_json(text):
+
+def extract_json(text: str) -> Optional[Dict]:
+    """
+    Extract and parse JSON from text, handling markdown code blocks.
+    
+    Args:
+        text: Raw text response from API
+        
+    Returns:
+        Dict: Parsed JSON object, or None if parsing fails
+    """
     try:
-        # Clean up Markdown formatting if Gemini wraps it in ```json
-        match = re.search(r'\{.*\}', text, re.DOTALL)
+        # Try to extract JSON object from markdown code blocks
+        match = re.search(r'\{[\s\S]*\}', text)
         if match:
-            return json.loads(match.group())
+            json_str = match.group()
+            return json.loads(json_str)
+        # If no match, try direct parsing
         return json.loads(text)
-    except:
+    except (json.JSONDecodeError, AttributeError) as e:
+        st.debug(f"JSON parsing failed: {e}")
         return None
 
-# 4. Sidebar Workspace
+
+def validate_input(api_key: str, content: str) -> tuple[bool, str]:
+    """
+    Validate API key and content before generation.
+    
+    Args:
+        api_key: Gemini API key
+        content: User-provided notes/content
+        
+    Returns:
+        tuple: (is_valid, error_message)
+    """
+    if not api_key or not api_key.strip():
+        return False, "❌ Missing API Key. Get one at aistudio.google.com"
+    
+    if not content or not content.strip():
+        return False, "❌ Please provide notes or upload documents."
+    
+    if len(content) > CONFIG["MAX_CHARS"]:
+        return False, f"❌ Content too long ({len(content)} chars). Max: {CONFIG['MAX_CHARS']} chars."
+    
+    return True, ""
+
+
+def get_char_count_status(char_count: int) -> tuple[str, str]:
+    """
+    Get character count status indicator.
+    
+    Args:
+        char_count: Number of characters
+        
+    Returns:
+        tuple: (emoji, css_class)
+    """
+    if char_count < CONFIG["WARN_CHARS"]:
+        return "🟢", "char-count-good"
+    elif char_count < CONFIG["MAX_CHARS"]:
+        return "🟡", "char-count-warn"
+    else:
+        return "🔴", "char-count-bad"
+
+
+def call_gemini_with_retry(model, prompt: str, max_retries: int = CONFIG["MAX_RETRIES"]):
+    """
+    Call Gemini API with exponential backoff retry logic.
+    
+    Args:
+        model: Gemini GenerativeModel instance
+        prompt: Prompt text
+        max_retries: Maximum number of retry attempts
+        
+    Returns:
+        Response object from API, or None on failure
+        
+    Raises:
+        Exception: If all retries fail
+    """
+    for attempt in range(1, max_retries + 1):
+        try:
+            return model.generate_content(prompt)
+        except Exception as e:
+            err_str = str(e)
+            
+            # Don't retry on client errors (401, 403, 404)
+            if any(code in err_str for code in ["401", "403", "404"]):
+                raise
+            
+            # Retry on server errors (429, 500, 503)
+            if attempt < max_retries and any(code in err_str for code in ["429", "500", "503"]):
+                wait_time = CONFIG["RETRY_DELAY"] ** attempt
+                with st.spinner(f"⏳ Attempt {attempt}/{max_retries} failed. Retrying in {wait_time}s..."):
+                    time.sleep(wait_time)
+                continue
+            
+            raise
+
+
+# ============================================================================
+# 4. SIDEBAR CONFIGURATION
+# ============================================================================
 with st.sidebar:
     st.title("📚 StudyStream Pro")
     st.markdown("<span class='status-badge'>Powered by Streamlit</span>", unsafe_allow_html=True)
     st.divider()
     
-    api_key_input = st.text_input("Gemini API Key", type="password", help="Get one at aistudio.google.com")
+    # API Key with env fallback
+    api_key_input = st.text_input(
+        "Gemini API Key",
+        type="password",
+        value=os.getenv("GEMINI_API_KEY", ""),
+        help="Get one at aistudio.google.com or set GEMINI_API_KEY env var"
+    )
     
-    # Using 'latest' is usually safest for 404 errors
+    # Model selection
     model_id = st.selectbox(
         "Model Version",
         ["gemini-1.5-flash-latest", "gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash-exp"],
-        help="If you get 404, stick to 'gemini-1.5-flash-latest'."
+        help="Use 'gemini-1.5-flash-latest' if you encounter 404 errors."
     )
     
+    # Topic and difficulty
     topic = st.text_input("Topic Name", "Molecular Chemistry")
-    level = st.select_slider("Level", ["Intro", "Mid", "Pro"], value="Mid")
+    level = st.select_slider(
+        "Difficulty Level",
+        ["Introductory", "Intermediate", "Advanced"],
+        value="Intermediate"
+    )
     
     st.divider()
-    uploaded_docs = st.file_uploader("Upload Source Documents", type=["pdf", "docx", "txt"], accept_multiple_files=True)
     
-    if st.button("Reset Session"):
+    # File upload
+    st.subheader("📤 Upload Documents")
+    uploaded_docs = st.file_uploader(
+        "Upload source materials (PDF, DOCX, TXT)",
+        type=["pdf", "docx", "txt"],
+        accept_multiple_files=True,
+        help="Supports multiple files"
+    )
+    
+    # Session reset
+    if st.button("🔄 Reset Session", use_container_width=True):
         st.session_state.clear()
         st.rerun()
 
-# 5. Application UI
+# ============================================================================
+# 5. MAIN APPLICATION UI
+# ============================================================================
 st.markdown("<h1 class='header-style'>StudyStream Generator</h1>", unsafe_allow_html=True)
-st.write("Generate professional-grade study materials from your notes.")
+st.write("Transform your notes into structured study guides powered by AI.")
 
-left, right = st.columns([1, 1.2], gap="large")
+# Two-column layout
+left_col, right_col = st.columns([1, 1.2], gap="large")
 
-with left:
-    st.markdown("### 📥 Source Notes")
+# ============================================================================
+# LEFT COLUMN: INPUT SECTION
+# ============================================================================
+with left_col:
+    st.markdown("### 📥 Source Material")
     
-    # 1. Get the text from uploaded files first
+    # Parse uploaded files
     parsed_text = parse_files(uploaded_docs)
     
-    # 2. Create the text area and assign its output to source_content
+    # Text area with auto-populated content
     source_content = st.text_area(
         "Paste or Preview Content",
         value=parsed_text,
-        height=400,
-        placeholder="Upload files in sidebar or paste text here..."
+        height=CONFIG["TEXTAREA_HEIGHT"],
+        placeholder="Upload files in sidebar or paste text here...",
+        help="Enter or paste your study notes, textbook excerpts, or classroom notes."
     )
     
-    # 3. NOW check the length, since source_content exists!
-    if len(source_content) > 15000:
-        st.warning("⚠️ High character count. If you encounter a '429 Quota' error, try selecting a smaller portion of text.")
+    # Character count with status indicator
+    char_count = len(source_content)
+    emoji, css_class = get_char_count_status(char_count)
+    st.markdown(f"<p class='{css_class}'>{emoji} {char_count:,} / {CONFIG['MAX_CHARS']:,} characters</p>", unsafe_allow_html=True)
+    
+    if char_count > CONFIG["WARN_CHARS"]:
+        st.warning("⚠️ Large content detected. If you hit rate limits (429), try a smaller selection.")
+    
+    # Generate button
+    if st.button("✨ Generate Study Guide", use_container_width=True, type="primary"):
+        is_valid, error_msg = validate_input(api_key_input, source_content)
         
-    if st.button("Generate Study Guide", use_container_width=True):
-        if not api_key_input:
-            st.error("Missing API Key.")
-        elif not source_content.strip():
-            st.warning("Please provide notes.")
+        if not is_valid:
+            st.error(error_msg)
         else:
-            with st.spinner(f"Gemini {model_id} is analyzing..."):
+            with st.spinner(f"🤖 {model_id} is analyzing your content..."):
                 try:
+                    # Configure and initialize Gemini
                     genai.configure(api_key=api_key_input)
                     model = genai.GenerativeModel(model_id)
-# ... (The rest of your prompt and try/except block remains exactly the same below this)
                     
-                    prompt = f"""
-                    Role: Expert Academic Tutor.
-                    Topic: {topic}
-                    Level: {level}
-                    Context: {source_content}
+                    # Craft the prompt
+                    prompt = f"""You are an expert academic tutor specializing in creating comprehensive study guides.
 
-                    Task: Create a precise study guide. 
-                    Format: Result MUST be ONLY a JSON object. No conversational filler or markdown code blocks.
-                    Structure:
-                    {{ 
-                      "summary": "3-5 high-level sentences",
-                      "keyTerms": [{{ "term": "term name", "definition": "clear academic definition" }}],
-                      "practiceQuestions": [{{ "question": "the question", "hint": "a helpful clue" }}] 
-                    }}
-                    """
+Topic: {topic}
+Difficulty Level: {level}
+Source Material:
+{source_content}
+
+Task: Create a high-quality study guide in the following JSON format ONLY. Return ONLY valid JSON with no markdown code blocks or extra text.
+
+{{
+  "summary": "Write 3-5 comprehensive sentences summarizing the key concepts",
+  "keyTerms": [
+    {{"term": "Term name", "definition": "Clear, academic definition (1-2 sentences)"}},
+    {{"term": "Term name", "definition": "Clear, academic definition (1-2 sentences)"}}
+  ],
+  "practiceQuestions": [
+    {{"question": "A thoughtful practice question", "hint": "A helpful hint or clue"}},
+    {{"question": "Another practice question", "hint": "Another helpful hint"}}
+  ]
+}}
+
+Ensure:
+- Minimum {CONFIG['MIN_TERMS']} key terms
+- Exactly {CONFIG['NUM_QUESTIONS']} practice questions
+- All definitions are academic and precise
+- Hints are useful but not spoilers
+"""
                     
-                    response = model.generate_content(prompt)
+                    # Call Gemini with retry logic
+                    response = call_gemini_with_retry(model, prompt)
+                    
+                    # Parse response
                     data = extract_json(response.text)
                     
-                    if data:
-                        st.session_state.study_data = data
-                        st.session_state.study_topic = topic
-                        st.success("Analysis Complete!")
+                    if data and isinstance(data, dict):
+                        if "summary" in data and "keyTerms" in data and "practiceQuestions" in data:
+                            st.session_state.study_data = data
+                            st.session_state.study_topic = topic
+                            st.session_state.study_level = level
+                            st.success("✅ Study guide generated successfully!")
+                            st.balloons()
+                        else:
+                            st.error("❌ Response missing required fields. Try again.")
+                            with st.expander("🔍 View raw response"):
+                                st.code(response.text)
                     else:
-                        st.error("Gemini didn't return a valid format. Try again.")
-                        st.code(response.text)
-                        
-                except Exception as e:
-                    err = str(e)
-                    if "429" in err:
-                        st.error("Quota Exceeded (429). The Free Tier has limits. Wait 60 seconds and try again, or use a smaller amount of text.")
-                    elif "404" in err:
-                        st.error(f"Model {model_id} not found (404). Try 'gemini-1.5-flash-latest'.")
-                    else:
-                        st.error(f"Error: {e}")
-
-with right:
-    st.markdown("### 🚀 Generated Result")
-    if "study_data" in st.session_state:
-        res = st.session_state.study_data
-        
-        st.markdown(f"#### {st.session_state.study_topic}")
-        st.write("---")
-        
-        st.markdown("##### 📖 Summary")
-        st.write(res.get('summary', 'No summary generated.'))
-        
-        st.markdown("##### 🏷️ Key Terms")
-        t_col1, t_col2 = st.columns(2)
-        for i, item in enumerate(res.get('keyTerms', [])):
-            col = t_col1 if i % 2 == 0 else t_col2
-            col.markdown(f"""
-            <div class='term-card'>
-                <strong style='color: #0369a1;'>{item.get('term')}</strong><br/>
-                <small>{item.get('definition')}</small>
-            </div>
-            """, unsafe_allow_html=True)
-            
-        st.markdown("##### 📝 Practice")
-        for i, q in enumerate(res.get('practiceQuestions', [])):
-            with st.expander(f"Question {i+1}"):
-                st.write(q.get('question'))
-                st.caption(f"Hint: {q.get('hint')}")
+                        st.error("❌ Failed to parse Gemini response as JSON.")
+                        with st.expander("🔍 View raw response"):
+                            st.code(response.text if hasattr(response, 'text') else str(response))
                 
-        # Export
-        export_txt = f"TOPIC: {st.session_state.study_topic}\n\nSUMMARY\n{res.get('summary')}\n\nKEY TERMS\n"
-        for t in res.get('keyTerms', []): export_txt += f"- {t.get('term')}: {t.get('definition')}\n"
-        
-        st.download_button("📥 Download txt", data=export_txt, file_name="studyguide.txt")
-    else:
-        st.info("Your study guide will appear here after generation.")
+                except Exception as e:
+                    err_str = str(e)
+                    
+                    # Categorized error messages
+                    if "429" in err_str:
+                        st.error("⏱️ Rate limit exceeded (429). Free tier has limits. Please wait 60 seconds and try again with a smaller text sample.")
+                    elif "404" in err_str:
+                        st.error(f"❌ Model '{model_id}' not found (404). Try 'gemini-1.5-flash-latest' instead.")
+                    elif "401" in err_str or "UNAUTHENTICATED" in err_str:
+                        st.error("🔐 Authentication failed (401). Check your API key.")
+                    elif "403" in err_str:
+                        st.error("🚫 Permission denied (403). Your API key may lack necessary permissions.")
+                    else:
+                        st.error(f"❌ Generation failed: {err_str}")
+                    
+                    with st.expander("💡 Troubleshooting tips"):
+                        st.write("""
+                        - Verify API key is correct
+                        - Check if model is available in your region
+                        - Try a shorter text sample
+                        - Use 'gemini-1.5-flash-latest' as fallback
+                        - Wait 60+ seconds before retrying after rate limit
+                        """)
 
-# Footer
+# ============================================================================
+# RIGHT COLUMN: OUTPUT SECTION
+# ============================================================================
+with right_col:
+    st.markdown("### 🚀 Generated Study Guide")
+    
+    if "study_data" in st.session_state:
+        data = st.session_state.study_data
+        topic_display = st.session_state.get("study_topic", "Study Guide")
+        level_display = st.session_state.get("study_level", "Intermediate")
+        
+        # Header
+        st.markdown(f"#### {topic_display}")
+        st.markdown(f"**Difficulty:** {level_display}")
+        st.divider()
+        
+        # Summary section
+        st.markdown("##### 📖 Executive Summary")
+        st.write(data.get('summary', 'No summary generated.'))
+        
+        st.write("")
+        
+        # Key terms section
+        st.markdown("##### 🏷️ Key Terminology")
+        term_col1, term_col2 = st.columns(2)
+        
+        for i, item in enumerate(data.get('keyTerms', [])):
+            col = term_col1 if i % 2 == 0 else term_col2
+            with col:
+                st.markdown(f"""
+                <div class='term-card'>
+                    <strong style='color: #0369a1;'>{item.get('term', 'N/A')}</strong><br/>
+                    <small style='line-height: 1.5;'>{item.get('definition', 'No definition')}</small>
+                </div>
+                """, unsafe_allow_html=True)
+        
+        st.write("")
+        
+        # Practice questions section
+        st.markdown("##### 📝 Practice Questions")
+        questions = data.get('practiceQuestions', [])
+        
+        if questions:
+            for i, q in enumerate(questions, 1):
+                with st.expander(f"Question {i}: {q.get('question', 'No question')[:60]}..."):
+                    st.write(f"**Q:** {q.get('question')}")
+                    st.info(f"**💡 Hint:** {q.get('hint')}")
+        else:
+            st.info("No practice questions generated.")
+        
+        st.write("")
+        st.divider()
+        
+        # Download section
+        export_text = f"STUDY GUIDE: {topic_display}\nLevel: {level_display}\n\n{'='*50}\n\nSUMMARY\n{data.get('summary')}\n\n{'='*50}\n\nKEY TERMS\n"
+        for term_item in data.get('keyTerms', []):
+            export_text += f"• {term_item.get('term')}: {term_item.get('definition')}\n\n"
+        
+        export_text += f"{'='*50}\n\nPRACTICE QUESTIONS\n"
+        for i, q in enumerate(data.get('practiceQuestions', []), 1):
+            export_text += f"{i}. {q.get('question')}\n   Hint: {q.get('hint')}\n\n"
+        
+        # Sanitize filename
+        safe_topic = topic_display.replace(" ", "_")[:30]
+        filename = f"studyguide_{safe_topic}.txt"
+        
+        st.download_button(
+            "📥 Download as Text File",
+            data=export_text,
+            file_name=filename,
+            use_container_width=True
+        )
+    else:
+        st.info("👈 Generate a study guide to see results here!")
+
+# ============================================================================
+# FOOTER
+# ============================================================================
 st.divider()
 st.markdown("""
 <div style='text-align: center; color: #94a3b8; font-size: 0.8rem;'>
-    Made with StudyStream • Built with <b>Streamlit</b> & <b>Google Gemini</b> 
+    <p>Built with <b>Streamlit</b> ✨ Powered by <b>Google Gemini</b> 🤖</p>
+    <p>StudyStream © 2026 | <a href='https://github.com/blahbalhbe/studystream' target='_blank'>View on GitHub</a></p>
 </div>
 """, unsafe_allow_html=True)
